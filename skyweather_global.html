@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#101820">
+<title>SkyWeather Global</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{color-scheme:dark;--bg:#101820;--panel:#18242e;--line:#30414e;--muted:#9fb0bd;--text:#edf4f8;--accent:#64c8ff}
+*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:14px system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+#map{position:absolute;inset:0}
+.top{position:absolute;z-index:1000;top:10px;left:10px;right:10px;display:flex;gap:8px;align-items:flex-start;pointer-events:none}
+.brand,.panel,.status{background:rgba(16,24,32,.94);border:1px solid var(--line);border-radius:12px;box-shadow:0 5px 24px #0008;backdrop-filter:blur(8px);pointer-events:auto}
+.brand{padding:10px 13px;min-width:160px}.brand strong{display:block;font-size:15px;letter-spacing:.4px}.brand small{color:var(--muted)}
+.panel{padding:9px;display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+button,select{background:#243441;color:var(--text);border:1px solid #405563;border-radius:8px;padding:8px 10px;font:inherit}
+button{cursor:pointer}button.active{background:#14516e;border-color:#64c8ff}
+.status{margin-left:auto;padding:9px 11px;font-size:12px;color:var(--muted);max-width:250px}
+#details{position:absolute;z-index:1000;left:10px;bottom:20px;width:min(340px,calc(100% - 20px));padding:12px;background:rgba(16,24,32,.96);border:1px solid var(--line);border-radius:12px;display:none;box-shadow:0 5px 24px #0008}
+#details h3{margin:0 0 8px;font-size:15px}#details .grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.metric{background:#22313c;padding:7px;border-radius:7px}.metric span{display:block;color:var(--muted);font-size:11px}.metric b{font-size:13px}
+#notice{position:absolute;z-index:1000;bottom:20px;right:10px;max-width:min(370px,calc(100% - 20px));padding:9px 11px;background:#18242eeF;border:1px solid var(--line);border-radius:10px;color:var(--muted);font-size:11px}
+.aircraft{color:#f5fbff;text-shadow:0 1px 3px #000;line-height:1;font-size:16px;transform-origin:center}
+.leaflet-popup-content-wrapper,.leaflet-popup-tip{background:#18242e;color:#edf4f8}.leaflet-control-attribution{background:#101820cc!important;color:#c5d1d9!important}
+.leaflet-control-attribution a{color:#8ed7ff!important}
+@media(max-width:760px){.top{flex-wrap:wrap}.brand{min-width:0}.status{margin-left:0;max-width:none}.panel{order:3;width:100%}button,select{padding:7px 8px;font-size:12px}#notice{bottom:12px;font-size:10px}}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="top">
+  <div class="brand"><strong>✈ SKYWEATHER GLOBAL</strong><small>Traffico ADS-B + radar meteo</small></div>
+  <div class="panel">
+    <button id="airBtn" class="active">✈ Aerei</button>
+    <button id="radarBtn" class="active">🌧 Radar</button>
+    <button id="coverageBtn">Copertura radar</button>
+    <button id="refreshBtn">Aggiorna aerei</button>
+    <select id="radarTime" aria-label="Orario radar"><option value="latest">Radar più recente</option></select>
+  </div>
+  <div class="status" id="status">Avvio mappa…</div>
+</div>
+<div id="details"></div>
+<div id="notice">Dati aerei: OpenSky Network (ADS-B). Aggiornamento automatico ogni 15 minuti per rispettare i limiti del servizio anonimo. Radar: RainViewer, archivio recente; copertura e disponibilità variano per area. Non usare per decisioni operative di volo.</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(() => {
+ const map=L.map('map',{worldCopyJump:true}).setView([22,8],2);
+ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'© OpenStreetMap'}).addTo(map);
+ const aircraftLayer=L.layerGroup().addTo(map);
+ let radarLayer=null,coverageLayer=null,aircraftOn=true,radarOn=true,coverageOn=false,aircraftData=[],lastAircraftFetch=0;
+ const status=document.getElementById('status'),details=document.getElementById('details');
+ const fmt=(n,d=0)=>n==null||!Number.isFinite(Number(n))?'—':Number(n).toLocaleString('it-IT',{maximumFractionDigits:d});
+ const altitude=m=>m==null?'—':`${fmt(m*3.28084)} ft`;
+ const speed=m=>m==null?'—':`${fmt(m*1.94384,0)} kt`;
+ const setStatus=t=>status.textContent=t;
+ function showAircraft(s){
+   const [icao,callsign,country,time,lon,lat,baro,geo,onGround,velocity,heading,vrate,sensors,geoAlt,squawk,spi,posSource]=s;
+   details.style.display='block';
+   details.innerHTML=`<h3>✈ ${callsign?.trim()||'Nominativo non disponibile'}</h3><div class="grid">
+    <div class="metric"><span>ICAO</span><b>${icao||'—'}</b></div><div class="metric"><span>Registrazione / paese</span><b>${country||'—'}</b></div>
+    <div class="metric"><span>Quota barometrica</span><b>${altitude(baro)}</b></div><div class="metric"><span>Velocità al suolo</span><b>${speed(velocity)}</b></div>
+    <div class="metric"><span>Prora</span><b>${heading==null?'—':fmt(heading)+'°'}</b></div><div class="metric"><span>Salita/discesa</span><b>${vrate==null?'—':fmt(vrate*196.85)+' ft/min'}</b></div>
+    <div class="metric"><span>Squawk</span><b>${squawk||'—'}</b></div><div class="metric"><span>Stato</span><b>${onGround?'A terra':'In volo'}</b></div>
+    </div><p style="color:#9fb0bd;font-size:11px;margin:8px 0 0">Posizione: ${fmt(lat,4)}, ${fmt(lon,4)} · Fonte: OpenSky</p>`;
+ }
+ function drawAircraft(states){
+   aircraftLayer.clearLayers(); aircraftData=states||[];
+   const bounds=map.getBounds().pad(.08);
+   let shown=0;
+   for(const s of aircraftData){
+     const lat=s[6],lon=s[5]; // OpenSky indexes: longitude 5, latitude 6
+     if(lat==null||lon==null||!bounds.contains([lat,lon])) continue;
+     if(shown>=4500) break;
+     const heading=s[10]||0,ground=s[8];
+     const icon=L.divIcon({className:'',html:`<div class="aircraft" style="transform:rotate(${heading}deg);color:${ground?'#ffc66d':'#f5fbff'}">✈</div>`,iconSize:[16,16],iconAnchor:[8,8]});
+     const marker=L.marker([lat,lon],{icon,keyboard:false});
+     marker.on('click',()=>showAircraft(s));
+     marker.addTo(aircraftLayer);shown++;
+   }
+   setStatus(`Aerei ricevuti: ${aircraftData.length.toLocaleString('it-IT')} · visibili: ${shown.toLocaleString('it-IT')}`);
+ }
+ async function loadAircraft(){
+   if(Date.now()-lastAircraftFetch<14*60*1000){setStatus('Aggiornamento già eseguito da poco: attendi il prossimo intervallo di 15 minuti.');return;}
+   lastAircraftFetch=Date.now();
+   setStatus('Caricamento traffico globale…');
+   try{
+     const r=await fetch('https://opensky-network.org/api/states/all',{cache:'no-store'});
+     if(!r.ok) throw new Error(`OpenSky HTTP ${r.status}`);
+     const data=await r.json();
+     drawAircraft(data.states||[]);
+     const when=data.time?new Date(data.time*1000).toLocaleTimeString('it-IT'):'—';
+     setStatus(`Aerei: ${(data.states||[]).length.toLocaleString('it-IT')} · dato ore ${when}`);
+   }catch(e){setStatus('Traffico non disponibile: '+e.message+' (verifica connessione/CORS o limiti API).');}
+ }
+ async function loadRadar(){
+   try{
+     const r=await fetch('https://api.rainviewer.com/public/weather-maps.json',{cache:'no-store'});
+     if(!r.ok) throw new Error('RainViewer non raggiungibile');
+     const j=await r.json(), frames=j.radar?.past||[];
+     if(!frames.length) throw new Error('Nessuna immagine radar disponibile');
+     const select=document.getElementById('radarTime');select.innerHTML='';
+     frames.slice().reverse().forEach((f,i)=>{
+       const o=document.createElement('option');o.value=f.path;o.textContent=new Date(f.time*1000).toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'})+(i===0?' · più recente':'');select.appendChild(o);
+     });
+     select.value=frames[frames.length-1].path;
+     setRadar(select.value);
+   }catch(e){setStatus('Radar non disponibile: '+e.message);}
+ }
+ function setRadar(path){
+   if(radarLayer)map.removeLayer(radarLayer);
+   radarLayer=L.tileLayer(`https://tilecache.rainviewer.com${path}/256/{z}/{x}/{y}/2/1_1.png`,{opacity:.62,zIndex:400,maxNativeZoom:7,maxZoom:18,attribution:'Weather data © RainViewer'});
+   if(radarOn)radarLayer.addTo(map);
+ }
+ document.getElementById('radarTime').addEventListener('change',e=>setRadar(e.target.value));
+ document.getElementById('airBtn').onclick=e=>{aircraftOn=!aircraftOn;e.currentTarget.classList.toggle('active',aircraftOn);if(aircraftOn)aircraftLayer.addTo(map);else map.removeLayer(aircraftLayer);};
+ document.getElementById('radarBtn').onclick=e=>{radarOn=!radarOn;e.currentTarget.classList.toggle('active',radarOn);if(radarLayer){if(radarOn)radarLayer.addTo(map);else map.removeLayer(radarLayer);}};
+ document.getElementById('coverageBtn').onclick=e=>{
+   coverageOn=!coverageOn;e.currentTarget.classList.toggle('active',coverageOn);
+   if(!coverageLayer)coverageLayer=L.tileLayer('https://tilecache.rainviewer.com/v2/coverage/0/256/{z}/{x}/{y}/0/0_0.png',{opacity:.35,maxNativeZoom:7,attribution:'Radar coverage © RainViewer'});
+   if(coverageOn)coverageLayer.addTo(map);else map.removeLayer(coverageLayer);
+ };
+ document.getElementById('refreshBtn').onclick=loadAircraft;
+ map.on('moveend',()=>{if(aircraftOn)drawAircraft(aircraftData)});
+ map.on('click',()=>{details.style.display='none'});
+ loadAircraft();loadRadar();
+ setInterval(loadAircraft,15*60*1000);
+ setInterval(loadRadar,10*60*1000);
+})();
+</script>
+</body>
+</html>
